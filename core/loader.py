@@ -37,42 +37,14 @@ DEFAULT_IGNORE_FILES = {
 DEFAULT_MAX_FILE_SIZE = 100 * 1024  # 100KB
 
 BINARY_EXTENSIONS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".bmp",
-    ".ico",
-    ".svg",
-    ".woff",
-    ".woff2",
-    ".ttf",
-    ".eot",
-    ".mp3",
-    ".mp4",
-    ".zip",
-    ".tar",
-    ".gz",
-    ".rar",
-    ".7z",
-    ".exe",
-    ".dll",
-    ".so",
-    ".dylib",
-    ".pyc",
-    ".pyo",
-    ".class",
-    ".jar",
-    ".wasm",
-    ".pdf",
-    ".doc",
-    ".docx",
-    ".xls",
-    ".xlsx",
-    ".ppt",
-    ".pptx",
-    ".sqlite",
-    ".db",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".mp3", ".mp4",
+    ".zip", ".tar", ".gz", ".rar", ".7z",
+    ".exe", ".dll", ".so", ".dylib",
+    ".pyc", ".pyo", ".class", ".jar", ".wasm",
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".sqlite", ".db",
 }
 
 
@@ -102,7 +74,6 @@ class RepoLoader:
         # Normalise focus_path to a forward-slash relative path prefix
         if focus_path:
             fp = Path(focus_path)
-            # If absolute and inside repo, make relative; otherwise use as-is
             try:
                 fp = fp.relative_to(self.repo_path)
             except ValueError:
@@ -154,11 +125,7 @@ class RepoLoader:
                 if self._should_ignore_file(entry.name):
                     continue
                 node["children"].append(
-                    {
-                        "name": entry.name,
-                        "type": "file",
-                        "size": entry.stat().st_size,
-                    }
+                    {"name": entry.name, "type": "file", "size": entry.stat().st_size}
                 )
 
     def get_files(self) -> list[dict]:
@@ -220,26 +187,30 @@ class RepoLoader:
         "entry", "start", "run", "manage", "wsgi", "asgi",
     }
     _ENTRY_CONTENT_PATTERNS = [
-        re.compile(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]'),  # Python
-        re.compile(r'\.listen\s*\('),                              # Node HTTP server
-        re.compile(r'app\.run\s*\('),                              # Flask / Express
+        re.compile(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]'),
+        re.compile(r'\.listen\s*\('),
+        re.compile(r'app\.run\s*\('),
     ]
 
-    def get_files_ranked(self, max_files: int = 50) -> list[dict]:
+    def get_files_ranked(
+        self,
+        max_files: int = 50,
+        summarize: bool = False,
+        max_full_content: int = 20,
+    ) -> list[dict]:
         """Return files sorted by entry-chain importance.
 
-        When focus_path is set, files inside that subtree are ranked first
-        (using their own entry-chain), then global files fill remaining slots.
-
-        Priority order:
-          1. Entry point files (focus subtree first, then global)
-          2. Files directly imported by entry points (depth 1)
-          3. Files imported at depth 2
-          4. Files imported at depth 3
-          5. Remaining files sorted by import frequency (most-imported first)
+        When summarize=True, uses a hybrid strategy:
+          - First max_full_content files: original content
+          - Remaining files (up to max_files): summarized content
+            (signatures + docstrings only, ~20 lines per file)
+        This keeps the token budget similar while covering 2-3x more files.
+        When focus_path is set, files in that subtree get 70% of slots.
         """
+        effective_max = (max_files * 2) if summarize else max_files
+
         all_files = self.get_files()
-        if len(all_files) <= max_files:
+        if len(all_files) <= effective_max and not summarize:
             return all_files
 
         file_by_path: dict[str, dict] = {f["path"]: f for f in all_files}
@@ -248,13 +219,26 @@ class RepoLoader:
         if self.focus_prefix:
             focus_files = [f for f in all_files if f["path"].startswith(self.focus_prefix)]
             other_files = [f for f in all_files if not f["path"].startswith(self.focus_prefix)]
-            focus_budget = max(int(max_files * 0.7), min(max_files, len(focus_files)))
-            other_budget = max_files - focus_budget
-            focus_ranked = self._rank_by_entry_chain(focus_files, file_by_path, all_paths, focus_budget)
-            other_ranked = self._rank_by_entry_chain(other_files, file_by_path, all_paths, other_budget)
-            return focus_ranked + other_ranked
+            focus_budget = max(int(effective_max * 0.7), min(effective_max, len(focus_files)))
+            other_budget = effective_max - focus_budget
+            ranked = (
+                self._rank_by_entry_chain(focus_files, file_by_path, all_paths, focus_budget)
+                + self._rank_by_entry_chain(other_files, file_by_path, all_paths, other_budget)
+            )
+        else:
+            ranked = self._rank_by_entry_chain(all_files, file_by_path, all_paths, effective_max)
 
-        return self._rank_by_entry_chain(all_files, file_by_path, all_paths, max_files)
+        if not summarize:
+            return ranked[:max_files]
+
+        result = []
+        for i, f in enumerate(ranked[:max_files]):
+            if i < max_full_content:
+                result.append({**f, "summarized": False})
+            else:
+                summary = self._summarize_file(f["path"], f.get("content") or "")
+                result.append({**f, "content": summary, "summarized": True})
+        return result
 
     def _rank_by_entry_chain(
         self,
@@ -315,7 +299,6 @@ class RepoLoader:
         entries: list[str] = []
         seen: set[str] = set()
 
-        # 1. Files whose stem matches entry name patterns
         for f in files:
             stem = Path(f["path"]).stem.lower()
             if stem in self._ENTRY_NAME_STEMS:
@@ -323,7 +306,6 @@ class RepoLoader:
                     entries.append(f["path"])
                     seen.add(f["path"])
 
-        # 2. Files containing entry-point content patterns
         for f in files:
             if f["path"] in seen:
                 continue
@@ -334,7 +316,6 @@ class RepoLoader:
                     seen.add(f["path"])
                     break
 
-        # 3. package.json bin/main fields
         for f in files:
             if not f["path"].endswith("package.json"):
                 continue
@@ -380,8 +361,6 @@ class RepoLoader:
         except SyntaxError:
             return result
 
-        pkg_dir = str(Path(filepath).parent)
-
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -405,11 +384,9 @@ class RepoLoader:
         current_file: str,
         all_paths: set[str],
     ) -> Optional[str]:
-        """Resolve a Python module name to a file path within the repo."""
         parts = module.split(".")
 
         if level:
-            # Relative import: go up `level` directories from current file
             base = Path(current_file).parent
             for _ in range(level - 1):
                 base = base.parent
@@ -417,16 +394,12 @@ class RepoLoader:
         else:
             candidate_parts = parts
 
-        # Try as package (dir/__init__.py) then as module (.py)
         as_module = "/".join(candidate_parts) + ".py"
         as_init = "/".join(candidate_parts) + "/__init__.py"
 
-        # Strip repo root prefix if present
         for candidate in (as_module, as_init):
-            # Try relative to repo root
             if candidate in all_paths:
                 return candidate
-            # Try stripping common prefixes (src/, lib/)
             for prefix in ("src/", "lib/"):
                 stripped = candidate[len(prefix):] if candidate.startswith(prefix) else None
                 if stripped and stripped in all_paths:
@@ -446,7 +419,7 @@ class RepoLoader:
         for match in self._JS_IMPORT_RE.finditer(content):
             target = match.group(1) or match.group(2) or match.group(3)
             if not target or not target.startswith("."):
-                continue  # skip node_modules imports
+                continue
             resolved = self._resolve_js_path(target, filepath, all_paths)
             if resolved:
                 result.add(resolved)
@@ -456,7 +429,6 @@ class RepoLoader:
         """Resolve a JS/TS relative import to a repo file path."""
         base = Path(current_file).parent
         candidate = (base / target).resolve()
-        # Make relative to repo root
         try:
             rel = candidate.relative_to(self.repo_path)
         except ValueError:
@@ -464,18 +436,140 @@ class RepoLoader:
 
         rel_str = str(rel)
 
-        # Try exact path first
         if rel_str in all_paths:
             return rel_str
 
-        # Try with common extensions
         for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
             with_ext = rel_str + ext
             if with_ext in all_paths:
                 return with_ext
-            # Try index file
             index = rel_str + "/index" + ext
             if index in all_paths:
                 return index
 
         return None
+
+    # ------------------------------------------------------------------ #
+    # File content summarization                                           #
+    # ------------------------------------------------------------------ #
+
+    def _summarize_file(self, filepath: str, content: str) -> str:
+        """Compress file content to signatures + docstrings."""
+        if not content.strip():
+            return content
+        ext = Path(filepath).suffix.lower()
+        if ext == ".py":
+            return self._summarize_python(content)
+        if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+            return self._summarize_js(content)
+        lines = content.splitlines()
+        if len(lines) <= 80:
+            return content
+        return "\n".join(lines[:80]) + f"\n... ({len(lines) - 80} more lines omitted)"
+
+    def _summarize_python(self, content: str) -> str:
+        """Extract Python class/function signatures and docstrings via AST."""
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            lines = content.splitlines()
+            return "\n".join(lines[:80]) + (
+                f"\n... ({len(lines)-80} more lines omitted)" if len(lines) > 80 else ""
+            )
+
+        parts: list[str] = []
+
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                try:
+                    parts.append(ast.unparse(node))
+                except Exception:
+                    pass
+
+            elif isinstance(node, ast.ClassDef):
+                bases = ", ".join(ast.unparse(b) for b in node.bases) if node.bases else ""
+                header = f"class {node.name}({bases}):" if bases else f"class {node.name}:"
+                doc = ast.get_docstring(node)
+                if doc:
+                    short_doc = doc.split("\n")[0][:120]
+                    header += f'\n    """{short_doc}"""'
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        try:
+                            prefix = "async " if isinstance(item, ast.AsyncFunctionDef) else ""
+                            args = ast.unparse(item.args)
+                            ret = f" -> {ast.unparse(item.returns)}" if item.returns else ""
+                            method_doc = ast.get_docstring(item)
+                            if method_doc:
+                                short = method_doc.split("\n")[0][:100]
+                                sig = f'    {prefix}def {item.name}({args}){ret}:\n        """{short}"""'
+                            else:
+                                sig = f"    {prefix}def {item.name}({args}){ret}: ..."
+                            header += f"\n{sig}"
+                        except Exception:
+                            pass
+                parts.append(header)
+
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                try:
+                    prefix = "async " if isinstance(node, ast.AsyncFunctionDef) else ""
+                    args = ast.unparse(node.args)
+                    ret = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+                    doc = ast.get_docstring(node)
+                    if doc:
+                        short = doc.split("\n")[0][:120]
+                        sig = f'{prefix}def {node.name}({args}){ret}:\n    """{short}"""'
+                    else:
+                        sig = f"{prefix}def {node.name}({args}){ret}: ..."
+                    parts.append(sig)
+                except Exception:
+                    pass
+
+            elif isinstance(node, ast.Assign):
+                try:
+                    unparsed = ast.unparse(node)
+                    if len(unparsed) <= 120:
+                        parts.append(unparsed)
+                except Exception:
+                    pass
+
+        return "\n\n".join(parts) if parts else content[:2000]
+
+    _JS_SIG_RE = re.compile(
+        r"^[ \t]*(?:export\s+(?:default\s+)?)?(?:"
+        r"(?:async\s+)?function\s*\*?\s*\w*\s*\("
+        r"|(?:abstract\s+)?class\s+\w+"
+        r"|(?:const|let|var)\s+\w+\s*(?::\s*\S+\s*)?=\s*(?:async\s+)?\("
+        r"|(?:const|let|var)\s+\w+\s*(?::\s*\S+\s*)?=\s*(?:async\s+)?function"
+        r"|interface\s+\w+"
+        r"|type\s+\w+\s*="
+        r"|enum\s+\w+"
+        r")",
+        re.MULTILINE,
+    )
+
+    def _summarize_js(self, content: str) -> str:
+        """Extract JS/TS signatures via regex (import lines + definition heads)."""
+        lines = content.splitlines()
+        kept: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            if stripped.startswith("import ") or stripped.startswith('} from "') or stripped.startswith("} from '"):
+                kept.append(line.rstrip())
+                i += 1
+                continue
+            if self._JS_SIG_RE.match(line):
+                kept.append(line.rstrip())
+                if line.rstrip().endswith("(") and i + 1 < len(lines):
+                    kept.append(lines[i + 1].rstrip() + "  // ...")
+                    i += 2
+                    continue
+            i += 1
+
+        if not kept:
+            return "\n".join(lines[:80]) + (
+                f"\n... ({len(lines)-80} more lines omitted)" if len(lines) > 80 else ""
+            )
+        return "\n".join(kept)

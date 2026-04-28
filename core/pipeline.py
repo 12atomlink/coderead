@@ -88,8 +88,10 @@ class Pipeline:
         loader = RepoLoader(repo_path, focus_path=focus_path)
         repo_summary = loader.get_summary()
         file_tree = loader.get_tree()
-        file_contents = loader.get_files_ranked(max_files=50)
-        print(f"[Pipeline] Found {repo_summary['total_files']} files total, selected {len(file_contents)} by entry-chain ranking")
+        file_contents = loader.get_files_ranked(max_files=100, summarize=True, max_full_content=20)
+        full_count = sum(1 for f in file_contents if not f.get("summarized"))
+        summary_count = sum(1 for f in file_contents if f.get("summarized"))
+        print(f"[Pipeline] Found {repo_summary['total_files']} files total, selected {len(file_contents)} ({full_count} full + {summary_count} summarized)")
 
         intermediate_dir = None
         if output_path and save_intermediate:

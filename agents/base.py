@@ -66,10 +66,13 @@ class BaseAgent:
         if not isinstance(result, dict):
             raise ValueError(f"[{self.agent_name}] Result must be a dict, got {type(result)}")
 
-    def _format_file_contents(self, file_contents: list[dict], max_files: int = 50) -> str:
+    def _format_file_contents(self, file_contents: list[dict], max_files: int = 100) -> str:
         parts = []
         for f in file_contents[:max_files]:
-            parts.append(f"### {f['path']}\n```\n{f['content']}\n```")
+            label = f["path"]
+            if f.get("summarized"):
+                label += " [摘要]"
+            parts.append(f"### {label}\n```\n{f['content']}\n```")
         if len(file_contents) > max_files:
             parts.append(f"\n... and {len(file_contents) - max_files} more files")
         return "\n\n".join(parts)
