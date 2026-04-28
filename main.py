@@ -102,6 +102,13 @@ Available steps: {step_names}
         action="store_true",
         help="List all available provider presets and exit",
     )
+    parser.add_argument(
+        "--focus",
+        default=None,
+        metavar="SUBDIR",
+        help="Focus analysis on a subdirectory (e.g. packages/opencode). "
+             "Files in this path get 70%% of the file slots, rest get 30%%.",
+    )
 
     args = parser.parse_args()
 
@@ -145,6 +152,7 @@ Available steps: {step_names}
             save_intermediate=not args.no_intermediate,
             resume=args.resume,
             from_step=args.from_step,
+            focus_path=args.focus,
         )
         print(f"\n✅ Analysis complete!")
         print(f"📄 Output: {args.output}")

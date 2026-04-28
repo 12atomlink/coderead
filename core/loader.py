@@ -83,6 +83,7 @@ class RepoLoader:
         ignore_dirs: Optional[set] = None,
         ignore_files: Optional[set] = None,
         max_file_size: int = DEFAULT_MAX_FILE_SIZE,
+        focus_path: Optional[str] = None,
     ):
         self.repo_path = Path(repo_path).resolve()
         if not self.repo_path.exists():
@@ -97,6 +98,18 @@ class RepoLoader:
             ignore_files if ignore_files is not None else DEFAULT_IGNORE_FILES
         )
         self.max_file_size = max_file_size
+
+        # Normalise focus_path to a forward-slash relative path prefix
+        if focus_path:
+            fp = Path(focus_path)
+            # If absolute and inside repo, make relative; otherwise use as-is
+            try:
+                fp = fp.relative_to(self.repo_path)
+            except ValueError:
+                pass
+            self.focus_prefix: Optional[str] = fp.as_posix().rstrip("/") + "/"
+        else:
+            self.focus_prefix = None
 
     def _should_ignore_dir(self, name: str) -> bool:
         return name in self.ignore_dirs or name.startswith(".")
@@ -215,8 +228,11 @@ class RepoLoader:
     def get_files_ranked(self, max_files: int = 50) -> list[dict]:
         """Return files sorted by entry-chain importance.
 
+        When focus_path is set, files inside that subtree are ranked first
+        (using their own entry-chain), then global files fill remaining slots.
+
         Priority order:
-          1. Entry point files (by name pattern or content pattern)
+          1. Entry point files (focus subtree first, then global)
           2. Files directly imported by entry points (depth 1)
           3. Files imported at depth 2
           4. Files imported at depth 3
@@ -229,19 +245,41 @@ class RepoLoader:
         file_by_path: dict[str, dict] = {f["path"]: f for f in all_files}
         all_paths: set[str] = set(file_by_path.keys())
 
-        # Build import graph for all files
+        if self.focus_prefix:
+            focus_files = [f for f in all_files if f["path"].startswith(self.focus_prefix)]
+            other_files = [f for f in all_files if not f["path"].startswith(self.focus_prefix)]
+            focus_budget = max(int(max_files * 0.7), min(max_files, len(focus_files)))
+            other_budget = max_files - focus_budget
+            focus_ranked = self._rank_by_entry_chain(focus_files, file_by_path, all_paths, focus_budget)
+            other_ranked = self._rank_by_entry_chain(other_files, file_by_path, all_paths, other_budget)
+            return focus_ranked + other_ranked
+
+        return self._rank_by_entry_chain(all_files, file_by_path, all_paths, max_files)
+
+    def _rank_by_entry_chain(
+        self,
+        candidate_files: list[dict],
+        file_by_path: dict[str, dict],
+        all_paths: set[str],
+        max_files: int,
+    ) -> list[dict]:
+        """Core BFS ranking: entry points → import chain → import frequency."""
+        if not candidate_files:
+            return []
+
+        candidate_paths = {f["path"] for f in candidate_files}
+
         import_graph: dict[str, set[str]] = {}
         import_frequency: dict[str, int] = {}
-        for f in all_files:
+        for f in candidate_files:
             deps = self._extract_imports(f["path"], f.get("content") or "", all_paths)
-            import_graph[f["path"]] = deps
-            for dep in deps:
+            local_deps = deps & candidate_paths
+            import_graph[f["path"]] = local_deps
+            for dep in local_deps:
                 import_frequency[dep] = import_frequency.get(dep, 0) + 1
 
-        # Identify entry points
-        entry_paths = self._find_entry_points(all_files, all_paths)
+        entry_paths = self._find_entry_points(candidate_files, candidate_paths)
 
-        # BFS from entry points (max depth 3)
         ranked: list[dict] = []
         visited: set[str] = set()
 
@@ -263,9 +301,8 @@ class RepoLoader:
                         next_level.append(dep)
             current_level = next_level
 
-        # Fill remaining slots by import frequency
         remaining = sorted(
-            [f for f in all_files if f["path"] not in visited],
+            [f for f in candidate_files if f["path"] not in visited],
             key=lambda f: import_frequency.get(f["path"], 0),
             reverse=True,
         )

@@ -78,11 +78,14 @@ class Pipeline:
         save_intermediate: bool = True,
         resume: bool = False,
         from_step: Optional[str] = None,
+        focus_path: Optional[str] = None,
     ) -> SharedDocument:
         tracker = StepTracker()
 
         print(f"[Pipeline] Loading repository: {repo_path}")
-        loader = RepoLoader(repo_path)
+        if focus_path:
+            print(f"[Pipeline] Focus: {focus_path} (70% slot priority)")
+        loader = RepoLoader(repo_path, focus_path=focus_path)
         repo_summary = loader.get_summary()
         file_tree = loader.get_tree()
         file_contents = loader.get_files_ranked(max_files=50)
