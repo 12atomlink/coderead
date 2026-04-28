@@ -1,273 +1,248 @@
 # coderead 改进计划
 
-> 核心问题：当前系统将所有理解工作外包给 LLM，没有静态分析兜底，导致分析质量完全取决于模型能力，且在大型仓库上容易失效。
+> 核心问题：当前系统将所有理解工作外包给 LLM，没有静态分析兜底，输出是文字列表而非可视化图表，导致两个根本缺陷：分析质量取决于模型能力，且在大型仓库上核心实现文件进不来。
+
+---
+
+## 能力差距评估
+
+当前系统擅长回答 **WHAT**（项目有哪些模块、整体流程是什么），不擅长回答 **HOW**（某个机制内部怎么实现的）。
+
+| 用户问题 | 当前输出能否回答 | 根因 |
+|----------|----------------|------|
+| 入口在哪、主流程是什么 | 部分（文字步骤，无图） | 缺少流程图输出 |
+| 项目分几层、模块关系 | 部分（表格，无可视化） | 缺少架构图输出 |
+| agentloop 怎么实现 | 基本不能（1/10） | 核心实现文件未进入分析 |
+| 会话数据怎么存 | 基本不能 | 同上 |
+| 系统提示词怎么加 | 基本不能 | 同上 |
 
 ---
 
 ## 问题地图
 
 ```
-现状：原始文件 ──(截取前50个)──> LLM ──> 分析结果
-                                  ↑
-                         模型需独立完成：
-                         - 依赖关系推断
-                         - 调用链追踪
-                         - 重要文件判断
-                         - 设计意图推断
+现状：原始文件 ──(截取前50个，按文件系统顺序)──> LLM ──> 文字列表输出
+                        ↑
+              入口文件、配置文件、前端文件占满了槽位
+              核心引擎实现文件（agent/session/tool）进不来
+              输出是表格和步骤列表，没有图表
 
-目标：原始文件 ──(静态预处理)──> 结构化摘要 ──> LLM ──> 分析结果
-                   ↑                              ↑
-           AST / import图                 更小、更准、更稳定的输入
-           函数签名提取
-           重要性评分
+目标：原始文件 ──(入口链追踪 + 分块)──> 核心实现文件优先 ──> LLM ──> 图表 + 文字
+                                                                  ↑
+                                                         Mermaid 架构图
+                                                         Mermaid 流程图
+                                                         按子系统深度分析
 ```
 
 ---
 
-## P1 — 高优先级（先做这三个，收益最大）
+## P1 — 高优先级
 
-### 1. 智能文件选择
+### 1. 🆕 图表生成（Mermaid 流程图 + 架构图）
 
-**现状问题**
+**解决问题**：用户需求 1（主函数流程图）、需求 2（架构图）
 
-`base.py:69` 硬截取前 50 个文件，按文件系统顺序排列。超过 50 个文件的仓库，重要文件可能直接被丢弃。
+**现状**：behavior agent 输出文字步骤列表，structure agent 输出模块表格，读者需要在脑中重建图。
 
 **改进方案**
 
-在 `RepoLoader` 中加入文件重要性评分，综合以下维度排序后再截取：
+- **structure agent**：在 JSON 输出中增加 `architecture_diagram` 字段，要求模型生成 Mermaid `graph TD` 架构图，表达模块分层和依赖方向
+- **behavior agent**：在每个 flow 中增加 `mermaid` 字段，要求模型生成 Mermaid `flowchart TD` 流程图
+- **report.py**：在 Markdown 渲染时将 Mermaid 代码块直接嵌入，GitHub / Obsidian / VSCode Preview 原生支持渲染
 
-| 维度 | 权重 | 实现方式 |
-|------|------|----------|
-| 被其他文件 import 的次数 | 高 | 全量扫描 import 语句统计 |
-| 文件名语义（main/core/base/engine/app） | 高 | 关键词列表匹配 |
-| 文件体积（过大/过小均降权） | 中 | 5KB–50KB 区间优先 |
-| 目录层级（越浅越重要） | 中 | 路径深度计算 |
-| 是否为入口点（if __main__、CLI 注册） | 高 | 简单文本扫描 |
+**影响文件**：`prompts/structure.md`、`prompts/behavior.md`、`core/context.py`、`core/report.py`
 
-**影响文件**：`core/loader.py`
+**实现复杂度**：低（纯 prompt 和渲染层改动，不依赖其他改进）
 
-**预期收益**：确保关键文件始终进入分析，对中大型仓库效果尤其明显。
-
-**实现复杂度**：低（纯 Python，不依赖外部库）
+**可立即用现有 JSON 验证**：对已有分析结果重新 `python core/report.py` 即可看效果
 
 ---
 
-### 2. 文件内容摘要化
+### 2. 🆕 入口链追踪式文件选择
 
-**现状问题**
+**解决问题**：用户需求 3（agentloop / 会话存储 / 系统提示词）的根本前提
 
-每个 agent 都接收原始文件全文。一个 500 行的文件中，LLM 真正需要的信息可能只有类签名和函数定义，其余是实现细节。大量 token 被浪费在 LLM 不需要精读的内容上，同时压缩了可分析的文件数量。
+**现状**：50 文件槽位被入口文件、前端文件、配置文件占满，核心引擎实现文件（`agent/`、`session/`、`tool/`）进不来。原有的"按 import 频率选文件"无法解决这个问题——核心实现文件往往是被调用者，import 频率反而低。
 
 **改进方案**
 
-在送给 LLM 前，用 Python `ast` 模块将文件内容转换为结构化摘要：
+从入口点出发，沿调用链向内追踪，优先选取实现层文件：
 
 ```
-原始文件（500行）→ 摘要（30行）
-─────────────────────────────────
-class Pipeline:
-    """Orchestrates agent execution."""
+第一步：识别入口点
+  - 扫描 main.py / index.ts / cmd/ / cli/ 等模式
+  - 读取 package.json 的 bin/main 字段
 
-    def run(repo_path, output_path, resume) -> SharedDocument: ...
-    def _backup_existing(output_path, intermediate_dir): ...
-    def _load_intermediate(filepath) -> Optional[dict]: ...
+第二步：沿 import 向内追踪（深度优先，最多 3 层）
+  - 入口 → 直接依赖 → 直接依赖的依赖
+  - 优先选取体积适中（5-50KB）的实现文件
+  - 跳过测试文件、类型声明、vendor
+
+第三步：补充覆盖
+  - 剩余槽位按 import 频率补充
 ```
 
-对非 Python 文件（JS/TS/Go 等）降级为基于正则的签名提取。
+**影响文件**：`core/loader.py`（新增 `get_files_by_entry_chain()` 方法）
 
-**影响文件**：`core/loader.py`（新增 `get_file_summaries()` 方法），各 agent 的 `build_user_prompt()`
-
-**预期收益**：
-- 单文件 token 消耗降低 80%
-- 可分析文件数从 50 个提升到 150–200 个
-- 减少模型"淹没在实现细节里"的问题
-
-**实现复杂度**：中（Python 文件用 `ast`，其他语言用正则降级）
+**实现复杂度**：中（Python 用 `ast` 解析 import，TS/JS 用正则，需处理相对路径解析）
 
 ---
 
-### 3. Import 依赖图预计算
+### 3. ↑ 大型仓库分块分析（从 P2 升级）
 
-**现状问题**
+**解决问题**：用户需求 3 的前提条件，对 monorepo 必要
 
-structure agent 需要从原始代码中自己推断模块依赖关系，这是典型的"让模型做本可以用程序精确完成的事"。模型推断的依赖可能有遗漏或幻觉，且 reviewer 无法校验。
+**现状**：50 文件硬截断，对 opencode 这类 monorepo，`packages/opencode/src/` 的内部文件永远进不来，不是优化问题，是前提条件。
 
 **改进方案**
 
-在 `RepoLoader` 中加入静态 import 分析，生成精确的依赖图，直接传给 structure agent：
+按顶层目录/包边界分块，每块独立走 structure + behavior 分析，最后汇总：
 
-```json
-{
-  "import_graph": {
-    "core/pipeline.py": ["agents/structure_agent", "agents/behavior_agent", "core/llm", "core/context"],
-    "agents/base.py": ["core/context", "core/llm"],
-    ...
-  },
-  "import_frequency": {
-    "core/llm": 6,
-    "core/context": 5,
-    ...
-  }
-}
+```
+monorepo/
+├── packages/opencode/  → 独立深度分析（最重要，优先）
+├── packages/app/       → 独立分析
+└── github/             → 独立分析
+                          ↓
+                    跨包关系汇总（narrative + tradeoff）
 ```
 
-structure agent 的 prompt 改为：基于已知依赖图，解释每条依赖的语义含义，而不是自己推断依赖关系。
+用户可配置分析优先级：`--focus packages/opencode` 让该包优先分配 token 预算。
 
-**影响文件**：`core/loader.py`，`prompts/structure.md`，`agents/structure_agent.py`
+**影响文件**：`core/pipeline.py`（新增 `ChunkedPipeline`）、`core/loader.py`、`main.py`（新增 `--focus` 参数）
 
-**预期收益**：
-- 依赖关系从"模型猜测"变为"程序确定 + 模型解释"
-- structure 分析结果更准确，后续所有 agent 的分析质量连带提升
-- 消除这一维度的幻觉风险
-
-**实现复杂度**：中（Python 用 `ast.parse`，其他语言用正则扫描 import/require/use 语句）
+**实现复杂度**：高
 
 ---
 
-## P2 — 中优先级
+### 4. 文件内容摘要化（原 P1-2）
 
-### 4. Agent 上下文按需裁剪
+**解决问题**：分块后每块仍可覆盖更多文件，提升分析深度
 
-**现状问题**
-
-behavior、intent、tradeoff agent 都把完整 `file_contents`（最多 50 个文件）传入。实际上：
-- behavior agent 主要需要"高频被调用"的文件
-- intent agent 主要需要配置、架构层文件
-- tradeoff agent 更多依赖已完成的前三轮分析，而非原始代码
-
-这导致每次 LLM 调用的 context 都接近上限，模型注意力被分散。
+**现状**：原始文件全文送入 LLM，每个文件平均几十 KB，token 大量浪费在实现细节上。
 
 **改进方案**
 
-根据每个 agent 的分析目标，定义不同的文件过滤策略：
-
-| Agent | 文件策略 |
-|-------|---------|
-| structure | 全量摘要（受益于完整视图） |
-| behavior | 入口文件 + 高 import 频率文件 |
-| intent | 配置文件 + 架构层文件 + 摘要 |
-| tradeoff | 仅使用前三轮分析结果，不传文件 |
-| reviewer | 仅使用完整分析文档，不传文件 |
-| narrative | 同 reviewer |
-
-**影响文件**：各 agent 的 `build_user_prompt()`
-
-**预期收益**：降低每次 LLM 调用成本，减少无关信息干扰，提升各 agent 分析焦点。
-
-**实现复杂度**：低（只改各 agent 的 prompt 构建逻辑）
-
----
-
-### 5. Reviewer 事实校验层
-
-**现状问题**
-
-reviewer agent 目前只做内部逻辑一致性检查（分析结论之间是否矛盾），无法发现事实性错误，例如：
-- structure 分析引用了不存在的文件路径
-- behavior 分析引用了实际不存在的函数名
-- 置信度评分与证据数量不匹配
-
-**改进方案**
-
-在 reviewer agent 运行前，加一个程序化的事实校验步骤（不调用 LLM）：
+用 Python `ast` 提取类签名 + 函数签名 + docstring，压缩 80% token：
 
 ```python
-def verify_facts(document: SharedDocument, repo_path: str) -> list[str]:
-    issues = []
-    # 检查所有引用的文件路径是否存在
-    for module in document.get_structure().get("modules", []):
-        if not Path(repo_path, module["path"]).exists():
-            issues.append(f"引用路径不存在: {module['path']}")
-    # 检查引用的函数名是否在代码中出现
-    ...
-    return issues
+# 原始（500 行） → 摘要（20 行）
+class AgentManager:
+    """Manages agent lifecycle and execution."""
+    def run(session_id: str, prompt: str) -> AsyncGenerator[Event, None]: ...
+    def stop(session_id: str) -> None: ...
 ```
 
-将校验结果作为附加上下文传给 reviewer agent，让它聚焦于解释和修复建议，而不是重新发现问题。
+对非 Python 文件（TS/JS/Go）降级为正则提取函数签名。
 
-**影响文件**：新增 `core/verifier.py`，`core/pipeline.py`，`agents/reviewer_agent.py`
-
-**预期收益**：从根本上杜绝幻觉路径引用，提高分析可信度。
+**影响文件**：`core/loader.py`、各 agent 的 `build_user_prompt()`
 
 **实现复杂度**：中
 
 ---
 
-### 6. 大型仓库分块策略
+## P2 — 中优先级
 
-**现状问题**
+### 5. Import 依赖图预计算（原 P1-3）
 
-对于超过 200 个文件的仓库，当前方案完全失效——大量文件被截断，分析结果失去代表性。
+**解决问题**：支撑入口链追踪（P1-2 的基础设施）、同时让 structure agent 的依赖分析从"模型猜测"变为"程序确定 + 模型解释"
 
 **改进方案**
 
-按目录模块分块，每块独立分析后汇总：
+用 `ast` / 正则扫描全量 import，生成依赖图传给 structure agent：
 
+```json
+{
+  "import_graph": {
+    "core/pipeline.py": ["agents/structure_agent", "core/llm", "core/context"],
+    "agents/base.py": ["core/context", "core/llm"]
+  },
+  "import_frequency": { "core/llm": 6, "core/context": 5 }
+}
 ```
-大型仓库
-├── frontend/   → 独立分析 → frontend 摘要
-├── backend/    → 独立分析 → backend 摘要
-└── shared/     → 独立分析 → shared 摘要
-                              ↓
-                        跨模块汇总分析
-```
 
-**影响文件**：`core/pipeline.py`（新增 `ChunkedPipeline`），`core/loader.py`
+**影响文件**：`core/loader.py`、`prompts/structure.md`、`agents/structure_agent.py`
 
-**预期收益**：支持企业级大型仓库，打破 50 文件上限的根本限制。
-
-**实现复杂度**：高（需要设计汇总策略，token 消耗增加）
+**实现复杂度**：中
 
 ---
 
-## P3 — 低优先级（有余力再做）
+### 6. Agent 上下文按需裁剪（原 P2-4）
 
-### 7. 多语言静态分析适配
+**解决问题**：降低每次 LLM 调用成本，提升分析焦点
 
-当前 import 图和签名提取只对 Python 有精确实现，其他语言降级为正则。可以逐步为 TypeScript/JavaScript（用 `@babel/parser`）、Go（用 `go/parser`）、Java（用 `javalang`）添加精确 AST 解析。
+| Agent | 当前 | 优化后 |
+|-------|------|--------|
+| structure | 全量文件 | 全量摘要 |
+| behavior | 全量文件 | 入口 + 高频文件 |
+| intent | 全量文件 | 配置 + 架构层文件 |
+| tradeoff | 全量文件 | 仅前三轮分析结果 |
+| reviewer | 全量文件 | 仅分析文档 |
+| narrative | 全量文件 | 仅分析文档 |
+
+**影响文件**：各 agent 的 `build_user_prompt()`
+
+**实现复杂度**：低
+
+---
+
+## P3 — 低优先级
+
+### 7. Reviewer 事实校验（原 P2-5）
+
+程序化验证分析结论中引用的文件路径和函数名是否真实存在，消除幻觉路径引用。
+
+**实现复杂度**：中
+
+---
+
+### 8. 多语言静态分析适配（原 P3-7）
+
+为 TypeScript/JavaScript、Go、Java 添加精确 AST 解析，替代当前的正则降级方案。
 
 **实现复杂度**：高（每种语言独立实现）
 
 ---
 
-### 8. 分析结果增量更新
+### 9. 增量分析（原 P3-8）
 
-基于 git diff，只对变更的文件重新分析，其余复用上次结果。对于持续维护的项目（每周跑一次分析）价值较高。
+基于 git diff，只对变更文件重新分析，适合持续维护场景。
 
-**实现复杂度**：高（需要文件级别的结果缓存和合并策略）
+**实现复杂度**：高
 
 ---
 
-## 实施路线建议
+## 实施路线
 
 ```
-第一阶段（降低模型依赖的基础）
-  └── P1-1 智能文件选择        ← 改动最小，收益最快
-  └── P1-3 Import 依赖图预计算 ← 与文件选择共享基础设施
+第一阶段：让输出可视化（改动最小，可立即验证）
+  └── P1-1 图表生成（Mermaid）← 可用现有 JSON 直接验证
 
-第二阶段（提升分析深度）
-  └── P1-2 文件内容摘要化      ← 依赖语言适配决策
-  └── P2-4 Agent 上下文裁剪   ← 依赖摘要化完成后再做
+第二阶段：让核心文件进来（解决 HOW 类问题的根本）
+  └── P1-2 入口链追踪式文件选择
+  └── P2-5 Import 依赖图（P1-2 的基础设施，先做）
 
-第三阶段（质量保障）
-  └── P2-5 Reviewer 事实校验  ← 依赖前两阶段建立的基础设施
+第三阶段：支持大型仓库
+  └── P1-3 分块分析
+  └── P1-4 文件内容摘要化
 
-第四阶段（规模化）
-  └── P2-6 大型仓库分块策略
-  └── P3-7/8 按需扩展
+第四阶段：降本提质
+  └── P2-6 Agent 上下文裁剪
+  └── P3-7 Reviewer 事实校验
 ```
 
 ---
 
 ## 各改进项总览
 
-| # | 改进项 | 优先级 | 复杂度 | 主要收益 |
+| # | 改进项 | 优先级 | 复杂度 | 直接解决 |
 |---|--------|--------|--------|---------|
-| 1 | 智能文件选择 | P1 | 低 | 关键文件不再被截断 |
-| 2 | 文件内容摘要化 | P1 | 中 | 覆盖文件数 3x，token 消耗降低 |
-| 3 | Import 依赖图预计算 | P1 | 中 | 依赖分析从猜测变为事实 |
-| 4 | Agent 上下文裁剪 | P2 | 低 | 降低成本，提升焦点 |
-| 5 | Reviewer 事实校验 | P2 | 中 | 消除路径/函数名幻觉 |
-| 6 | 大型仓库分块 | P2 | 高 | 支持 200+ 文件仓库 |
-| 7 | 多语言静态分析 | P3 | 高 | 提升非 Python 仓库质量 |
-| 8 | 增量更新 | P3 | 高 | 持续维护场景提速 |
+| 1 | 🆕 Mermaid 图表生成 | P1 | 低 | 需求 1、2（流程图、架构图） |
+| 2 | 🆕 入口链追踪文件选择 | P1 | 中 | 需求 3（核心机制分析） |
+| 3 | ↑ 大型仓库分块 | P1 | 高 | 需求 3 的前提 |
+| 4 | 文件内容摘要化 | P1 | 中 | 覆盖更多文件 |
+| 5 | Import 依赖图预计算 | P2 | 中 | 支撑入口链追踪 |
+| 6 | Agent 上下文裁剪 | P2 | 低 | 降低成本 |
+| 7 | Reviewer 事实校验 | P3 | 中 | 消除幻觉引用 |
+| 8 | 多语言静态分析 | P3 | 高 | 非 Python 仓库质量 |
+| 9 | 增量分析 | P3 | 高 | 持续维护场景 |

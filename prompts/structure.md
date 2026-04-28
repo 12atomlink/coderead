@@ -23,6 +23,12 @@
    - `type`：类型，取值："main"、"cli"、"api"、"test"、"script"
    - `description`：该入口点的功能（用中文描述）
 
+4. **架构图（architecture_diagram）**：用 Mermaid `graph TD` 语法生成一张架构图，直观展示模块分层和依赖关系。要求：
+   - 用子图（subgraph）表达层次边界（如"入口层"、"核心层"、"基础设施层"）
+   - 节点使用模块名，边的标签说明依赖类型（import / call / config / data）
+   - 只画主要依赖，不要把所有关系都画出来，保持图可读
+   - 直接输出 Mermaid 语法字符串，不要加 ``` 围栏
+
 ## 规则
 
 - 每个结论必须引用具体的文件路径或代码位置
@@ -60,6 +66,7 @@
       "description": ""
     }
   ],
+  "architecture_diagram": "graph TD\n  subgraph 入口层\n    A[main.py]\n  end\n  subgraph 核心层\n    B[core/pipeline.py]\n  end\n  A -->|call| B",
   "confidence": 0.0,
   "evidence": [
     {

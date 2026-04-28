@@ -15,6 +15,7 @@ def create_empty_document(repo_name: str = "") -> dict:
             "modules": [],
             "dependencies": [],
             "entry_points": [],
+            "architecture_diagram": "",
             "confidence": 0.0,
             "evidence": [],
         },

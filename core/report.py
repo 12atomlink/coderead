@@ -96,6 +96,11 @@ def _render_structure(data: dict) -> str:
             desc = e.get("description", "")
             parts.append(f"- **{name}**：{desc}")
 
+    diagram = structure.get("architecture_diagram", "")
+    if diagram and diagram.strip():
+        parts.append(f"\n### 架构图\n")
+        parts.append(f"```mermaid\n{diagram.strip()}\n```")
+
     confidence = structure.get("confidence")
     if confidence is not None:
         parts.append(f"\n> 置信度：{confidence:.0%}")
@@ -138,6 +143,9 @@ def _render_behavior(data: dict) -> str:
                             parts.append(f"  {j}. {s}")
                     else:
                         parts.append(f"  {j}. {s}")
+            mermaid = f.get("mermaid", "")
+            if mermaid and mermaid.strip():
+                parts.append(f"\n```mermaid\n{mermaid.strip()}\n```")
 
     data_flows = behavior.get("data_flow", [])
     if data_flows:
