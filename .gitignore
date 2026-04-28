@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Output (generated)
+output/
+
+# Config with secrets
+llm-config.json
+
+# macOS
+.DS_Store

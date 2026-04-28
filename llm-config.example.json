@@ -1,0 +1,8 @@
+{
+  "provider": "deepseek",
+  "api_key": "",
+  "base_url": "",
+  "model": "",
+  "max_tokens": 16000,
+  "temperature": 0.1
+}
