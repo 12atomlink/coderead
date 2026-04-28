@@ -85,8 +85,8 @@ class Pipeline:
         loader = RepoLoader(repo_path)
         repo_summary = loader.get_summary()
         file_tree = loader.get_tree()
-        file_contents = loader.get_files()
-        print(f"[Pipeline] Found {repo_summary['total_files']} files")
+        file_contents = loader.get_files_ranked(max_files=50)
+        print(f"[Pipeline] Found {repo_summary['total_files']} files total, selected {len(file_contents)} by entry-chain ranking")
 
         intermediate_dir = None
         if output_path and save_intermediate:

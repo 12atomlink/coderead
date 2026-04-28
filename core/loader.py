@@ -1,4 +1,7 @@
+import ast
+import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -194,3 +197,248 @@ class RepoLoader:
             "total_files": len(files),
             "extensions": extensions,
         }
+
+    # ------------------------------------------------------------------ #
+    # Entry-chain ranked file selection                                    #
+    # ------------------------------------------------------------------ #
+
+    _ENTRY_NAME_STEMS = {
+        "main", "index", "app", "server", "cli", "cmd",
+        "entry", "start", "run", "manage", "wsgi", "asgi",
+    }
+    _ENTRY_CONTENT_PATTERNS = [
+        re.compile(r'if\s+__name__\s*==\s*[\'"]__main__[\'"]'),  # Python
+        re.compile(r'\.listen\s*\('),                              # Node HTTP server
+        re.compile(r'app\.run\s*\('),                              # Flask / Express
+    ]
+
+    def get_files_ranked(self, max_files: int = 50) -> list[dict]:
+        """Return files sorted by entry-chain importance.
+
+        Priority order:
+          1. Entry point files (by name pattern or content pattern)
+          2. Files directly imported by entry points (depth 1)
+          3. Files imported at depth 2
+          4. Files imported at depth 3
+          5. Remaining files sorted by import frequency (most-imported first)
+        """
+        all_files = self.get_files()
+        if len(all_files) <= max_files:
+            return all_files
+
+        file_by_path: dict[str, dict] = {f["path"]: f for f in all_files}
+        all_paths: set[str] = set(file_by_path.keys())
+
+        # Build import graph for all files
+        import_graph: dict[str, set[str]] = {}
+        import_frequency: dict[str, int] = {}
+        for f in all_files:
+            deps = self._extract_imports(f["path"], f.get("content") or "", all_paths)
+            import_graph[f["path"]] = deps
+            for dep in deps:
+                import_frequency[dep] = import_frequency.get(dep, 0) + 1
+
+        # Identify entry points
+        entry_paths = self._find_entry_points(all_files, all_paths)
+
+        # BFS from entry points (max depth 3)
+        ranked: list[dict] = []
+        visited: set[str] = set()
+
+        current_level = [p for p in entry_paths if p in file_by_path]
+        for path in current_level:
+            if path not in visited:
+                ranked.append(file_by_path[path])
+                visited.add(path)
+
+        for _ in range(3):
+            if len(ranked) >= max_files:
+                break
+            next_level: list[str] = []
+            for path in current_level:
+                for dep in import_graph.get(path, set()):
+                    if dep not in visited and dep in file_by_path:
+                        ranked.append(file_by_path[dep])
+                        visited.add(dep)
+                        next_level.append(dep)
+            current_level = next_level
+
+        # Fill remaining slots by import frequency
+        remaining = sorted(
+            [f for f in all_files if f["path"] not in visited],
+            key=lambda f: import_frequency.get(f["path"], 0),
+            reverse=True,
+        )
+        ranked.extend(remaining)
+
+        return ranked[:max_files]
+
+    def _find_entry_points(self, files: list[dict], all_paths: set[str]) -> list[str]:
+        """Identify likely entry point files."""
+        entries: list[str] = []
+        seen: set[str] = set()
+
+        # 1. Files whose stem matches entry name patterns
+        for f in files:
+            stem = Path(f["path"]).stem.lower()
+            if stem in self._ENTRY_NAME_STEMS:
+                if f["path"] not in seen:
+                    entries.append(f["path"])
+                    seen.add(f["path"])
+
+        # 2. Files containing entry-point content patterns
+        for f in files:
+            if f["path"] in seen:
+                continue
+            content = f.get("content") or ""
+            for pat in self._ENTRY_CONTENT_PATTERNS:
+                if pat.search(content):
+                    entries.append(f["path"])
+                    seen.add(f["path"])
+                    break
+
+        # 3. package.json bin/main fields
+        for f in files:
+            if not f["path"].endswith("package.json"):
+                continue
+            try:
+                pkg = json.loads(f.get("content") or "{}")
+                for field in ("main", "module"):
+                    target = pkg.get(field)
+                    if isinstance(target, str):
+                        resolved = self._resolve_js_path(target, f["path"], all_paths)
+                        if resolved and resolved not in seen:
+                            entries.append(resolved)
+                            seen.add(resolved)
+                bin_field = pkg.get("bin")
+                if isinstance(bin_field, str):
+                    resolved = self._resolve_js_path(bin_field, f["path"], all_paths)
+                    if resolved and resolved not in seen:
+                        entries.append(resolved)
+                        seen.add(resolved)
+                elif isinstance(bin_field, dict):
+                    for target in bin_field.values():
+                        resolved = self._resolve_js_path(target, f["path"], all_paths)
+                        if resolved and resolved not in seen:
+                            entries.append(resolved)
+                            seen.add(resolved)
+            except (json.JSONDecodeError, Exception):
+                pass
+
+        return entries
+
+    def _extract_imports(self, filepath: str, content: str, all_paths: set[str]) -> set[str]:
+        """Extract local file dependencies from a source file."""
+        ext = Path(filepath).suffix.lower()
+        if ext == ".py":
+            return self._extract_python_imports(filepath, content, all_paths)
+        if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"):
+            return self._extract_js_imports(filepath, content, all_paths)
+        return set()
+
+    def _extract_python_imports(self, filepath: str, content: str, all_paths: set[str]) -> set[str]:
+        result: set[str] = set()
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return result
+
+        pkg_dir = str(Path(filepath).parent)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    resolved = self._resolve_python_module(alias.name, None, filepath, all_paths)
+                    if resolved:
+                        result.add(resolved)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    resolved = self._resolve_python_module(
+                        node.module, node.level, filepath, all_paths
+                    )
+                    if resolved:
+                        result.add(resolved)
+
+        return result
+
+    def _resolve_python_module(
+        self,
+        module: str,
+        level: Optional[int],
+        current_file: str,
+        all_paths: set[str],
+    ) -> Optional[str]:
+        """Resolve a Python module name to a file path within the repo."""
+        parts = module.split(".")
+
+        if level:
+            # Relative import: go up `level` directories from current file
+            base = Path(current_file).parent
+            for _ in range(level - 1):
+                base = base.parent
+            candidate_parts = list(base.parts) + parts
+        else:
+            candidate_parts = parts
+
+        # Try as package (dir/__init__.py) then as module (.py)
+        as_module = "/".join(candidate_parts) + ".py"
+        as_init = "/".join(candidate_parts) + "/__init__.py"
+
+        # Strip repo root prefix if present
+        for candidate in (as_module, as_init):
+            # Try relative to repo root
+            if candidate in all_paths:
+                return candidate
+            # Try stripping common prefixes (src/, lib/)
+            for prefix in ("src/", "lib/"):
+                stripped = candidate[len(prefix):] if candidate.startswith(prefix) else None
+                if stripped and stripped in all_paths:
+                    return stripped
+
+        return None
+
+    _JS_IMPORT_RE = re.compile(
+        r'(?:import|export).*?from\s+[\'"]([^\'"\s]+)[\'"]'
+        r'|require\s*\(\s*[\'"]([^\'"\s]+)[\'"]\s*\)'
+        r'|import\s*\(\s*[\'"]([^\'"\s]+)[\'"]\s*\)',
+        re.MULTILINE,
+    )
+
+    def _extract_js_imports(self, filepath: str, content: str, all_paths: set[str]) -> set[str]:
+        result: set[str] = set()
+        for match in self._JS_IMPORT_RE.finditer(content):
+            target = match.group(1) or match.group(2) or match.group(3)
+            if not target or not target.startswith("."):
+                continue  # skip node_modules imports
+            resolved = self._resolve_js_path(target, filepath, all_paths)
+            if resolved:
+                result.add(resolved)
+        return result
+
+    def _resolve_js_path(self, target: str, current_file: str, all_paths: set[str]) -> Optional[str]:
+        """Resolve a JS/TS relative import to a repo file path."""
+        base = Path(current_file).parent
+        candidate = (base / target).resolve()
+        # Make relative to repo root
+        try:
+            rel = candidate.relative_to(self.repo_path)
+        except ValueError:
+            return None
+
+        rel_str = str(rel)
+
+        # Try exact path first
+        if rel_str in all_paths:
+            return rel_str
+
+        # Try with common extensions
+        for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs"):
+            with_ext = rel_str + ext
+            if with_ext in all_paths:
+                return with_ext
+            # Try index file
+            index = rel_str + "/index" + ext
+            if index in all_paths:
+                return index
+
+        return None
