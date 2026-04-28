@@ -15,6 +15,7 @@ class ProviderConfig:
 
 
 MODELSCOPE_FALLBACK_MODELS = [
+    "deepseek-ai/DeepSeek-V4-Pro",
     "ZhipuAI/GLM-5",
     "moonshotai/Kimi-K2.5",
     "deepseek-ai/DeepSeek-V3.2",

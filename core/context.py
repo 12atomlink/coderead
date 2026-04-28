@@ -45,6 +45,13 @@ def create_empty_document(repo_name: str = "") -> dict:
             "low_confidence_areas": [],
             "suggestions": [],
         },
+        "narrative": {
+            "overview": "",
+            "orientation": "",
+            "how_it_works": "",
+            "reading_guide": [],
+            "watch_out": [],
+        },
     }
 
 
@@ -82,6 +89,9 @@ class SharedDocument:
 
     def get_review(self) -> dict:
         return self._data.get("review", {})
+
+    def to_dict(self) -> dict:
+        return self._data
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self._data, indent=indent, ensure_ascii=False)

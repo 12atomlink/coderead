@@ -6,6 +6,7 @@ from typing import Optional
 
 from agents.behavior_agent import BehaviorAgent
 from agents.intent_agent import IntentAgent
+from agents.narrative_agent import NarrativeAgent
 from agents.reviewer_agent import ReviewerAgent
 from agents.structure_agent import StructureAgent
 from agents.tradeoff_agent import TradeoffAgent
@@ -14,7 +15,7 @@ from core.llm import LLMClient
 from core.loader import RepoLoader
 from core.report import save_report, save_step_report
 
-AGENT_NAMES = ["structure", "behavior", "intent", "tradeoff", "reviewer"]
+AGENT_NAMES = ["structure", "behavior", "intent", "tradeoff", "reviewer", "narrative"]
 
 
 class StepTracker:
@@ -67,6 +68,7 @@ class Pipeline:
             IntentAgent(llm),
             TradeoffAgent(llm),
             ReviewerAgent(llm),
+            NarrativeAgent(llm),
         ]
 
     def run(

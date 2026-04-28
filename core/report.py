@@ -13,11 +13,49 @@ def generate_report(data: dict) -> str:
     parts.append(f"# {repo_name} 项目分析报告\n")
     parts.append(f"> 生成时间：{analyzed_at}\n")
 
+    parts.append(_render_narrative(data))
     parts.append(_render_structure(data))
     parts.append(_render_behavior(data))
     parts.append(_render_intent(data))
     parts.append(_render_tradeoff(data))
     parts.append(_render_review(data))
+
+    return "\n".join(parts)
+
+
+def _render_narrative(data: dict) -> str:
+    narrative = data.get("narrative", {})
+    if not narrative or not narrative.get("overview"):
+        return ""
+
+    parts = ["\n---\n\n## 项目导读\n"]
+
+    overview = narrative.get("overview", "")
+    if overview:
+        parts.append(f"> **{overview}**\n")
+
+    orientation = narrative.get("orientation", "")
+    if orientation:
+        parts.append(f"\n### 核心理解\n\n{orientation}")
+
+    how_it_works = narrative.get("how_it_works", "")
+    if how_it_works:
+        parts.append(f"\n### 它是怎么运转的\n\n{how_it_works}")
+
+    reading_guide = narrative.get("reading_guide", [])
+    if reading_guide:
+        parts.append(f"\n### 建议阅读路线\n")
+        for item in reading_guide:
+            step = item.get("step", "")
+            path = item.get("path", "")
+            reason = item.get("reason", "")
+            parts.append(f"{step}. **`{path}`** — {reason}")
+
+    watch_out = narrative.get("watch_out", [])
+    if watch_out:
+        parts.append(f"\n### 注意事项\n")
+        for item in watch_out:
+            parts.append(f"- {item}")
 
     return "\n".join(parts)
 
@@ -294,6 +332,7 @@ def _render_review(data: dict) -> str:
 
 
 STEP_RENDERERS = {
+    "narrative": _render_narrative,
     "structure": _render_structure,
     "behavior": _render_behavior,
     "intent": _render_intent,
@@ -302,6 +341,7 @@ STEP_RENDERERS = {
 }
 
 STEP_TITLES = {
+    "narrative": "项目导读",
     "structure": "项目结构",
     "behavior": "执行流分析",
     "intent": "设计意图",
