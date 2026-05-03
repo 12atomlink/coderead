@@ -24,6 +24,12 @@ uv run python main.py ./path/to/repo --provider deepseek --resume
 # Start from a specific pipeline step
 uv run python main.py ./path/to/repo --provider deepseek --from-step behavior
 
+# Focus analysis on a subdirectory (70% of file slots → that path, 30% → rest)
+uv run python main.py ./monorepo --focus packages/core --provider deepseek
+
+# Skip saving per-step intermediate results
+uv run python main.py ./path/to/repo --provider deepseek --no-intermediate
+
 # List available providers and their default models
 uv run python main.py --list-providers
 
@@ -31,13 +37,13 @@ uv run python main.py --list-providers
 uv run python core/report.py output/analysis.json output/analysis.md
 ```
 
-Output defaults to `output/analysis.json` and `output/analysis.md`. Intermediate per-step results go to `output/intermediate/`. Previous runs are automatically backed up to `output/backup/<timestamp>/`.
+Output defaults to `output/analysis.json` and `output/analysis.md`. Intermediate per-step results go to `output/intermediate/`. Previous runs are automatically backed up to `output/backup/<timestamp>/`. Raw LLM responses on JSON parse failure go to `output/debug/`.
 
 ## Architecture
 
 ### Pipeline flow
 
-`main.py` → `Pipeline` → `RepoLoader` → 5 sequential agents → `SharedDocument` → JSON + Markdown output
+`main.py` → `Pipeline` → `RepoLoader` → 6 sequential agents → `SharedDocument` → JSON + Markdown output
 
 ### Core modules (`core/`)
 
@@ -46,19 +52,20 @@ Output defaults to `output/analysis.json` and `output/analysis.md`. Intermediate
 | `pipeline.py` | Orchestrates agent execution, handles resume/skip logic, backup of prior runs |
 | `llm.py` | OpenAI-compatible client; falls back to streaming when non-stream fails; retries JSON parse up to 2× on a fallback model |
 | `providers.py` | Named provider presets (deepseek, qwen, moonshot, siliconflow, modelscope, ollama, …); `resolve_config()` merges CLI flags → config file → env vars |
-| `loader.py` | Walks a repo directory, skips binaries/large files (>100 KB), returns file tree + contents |
+| `loader.py` | Walks a repo directory, ranks files by entry-chain (BFS from entry points following imports); first 20 files get full content, remaining up to 100 get signatures/docstrings only; skips binaries and files >100 KB |
 | `context.py` | `SharedDocument` — the shared data structure passed through the pipeline; each agent writes one section |
-| `report.py` | Renders `SharedDocument` to Markdown; also usable standalone |
+| `report.py` | Renders `SharedDocument` to Markdown with Chinese headings and embedded Mermaid diagrams; also usable standalone |
 
 ### Agent pipeline (`agents/`)
 
-Agents run in strict order; each reads `SharedDocument` from prior steps and writes one section:
+Agents run in strict order; each reads `SharedDocument` from prior steps and writes one section. All prompts in `prompts/` are written in Chinese.
 
-1. **structure** — modules, dependencies, entry points
-2. **behavior** — execution flows, data flow, control flow
+1. **structure** — modules, dependencies, entry points, architecture diagram
+2. **behavior** — execution flows, data flow, control flow (with Mermaid flowcharts)
 3. **intent** — design goals, architectural patterns, assumptions
 4. **tradeoff** — pros, cons, alternatives, risks
 5. **reviewer** — cross-checks all sections for issues and inconsistencies
+6. **narrative** — human-readable overview, orientation, and reading guide (Chinese)
 
 `BaseAgent` in `agents/base.py` handles: loading the prompt from `prompts/<agent>.md`, calling `llm.chat_json()`, saving raw LLM response to `output/debug/` on failure.
 
